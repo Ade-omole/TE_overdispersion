@@ -1,13 +1,13 @@
-# Transposable Element Overdispersion: Theory and Data Analysis
+# Overdispersion in transposable elements copy numbers: theory and data
 
-This repository contains the code and data for analyzing overdispersion in transposable element (TE) copy number distributions using Moran model simulations and empirical data analysis.
+This repository contains the code and data for analyzing overdispersion in transposable element (TE) copy number distributions.
 
 ## Overview
 
-This project investigates the statistical properties of transposable element copy number distributions in populations, focusing on overdispersion (variance exceeding the mean). The analysis combines:
+This project investigates the overdispersion (variance > mean) of transposable element copy number distributions in populations. The analysis combines:
 
-- **Theoretical modeling**: Moran model simulations with selection and recombination
-- **Approximate dynamics**: Comparison of approximate and negative binomial closure methods
+- **Stochastic simulation**: Wright-Fisher simulations with selection and recombination
+- **Theoretical Moran model**: Approximate and parametric closure methods
 - **Empirical data analysis**: Analysis of TE copy number data from *Drosophila melanogaster*
 
 ## Repository Structure
