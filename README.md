@@ -108,6 +108,6 @@ If you use this code or data, please cite:
 
 Omole, A. D., & Czuppon, P. A population genetics model explaining overdispersion in active transposable elements.
 
-Empirical data source: [Lee et al. (2022)]([https://doi.org/10.1093/gbe/evac016](https://academic.oup.com/genetics/article/220/2/iyab211/6458331)), DPGP3 TE insertion matrix ([raw data](https://github.com/jumpingTE-LeeLab/TE_insertion_DPGP3_raw)).
+Empirical data source: [Lee et al. (2022)]((https://academic.oup.com/genetics/article/220/2/iyab211/6458331)), DPGP3 TE insertion matrix ([raw data](https://github.com/jumpingTE-LeeLab/TE_insertion_DPGP3_raw)).
 
-Theory comparison: [Roze (2023)]([https://doi.org/10.1093/gbe/evad123](https://academic.oup.com/genetics/article/224/2/iyad058/7109257?guestAccessKey=)).
+Theory comparison: [Roze (2023)]((https://academic.oup.com/genetics/article/224/2/iyad058/7109257?guestAccessKey=)).
