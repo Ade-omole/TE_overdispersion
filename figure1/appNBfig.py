@@ -1,0 +1,218 @@
+"""Plot mean and variance trajectories: approximate vs negative-binomial closure."""
+
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
+FIG_DIR = Path(__file__).resolve().parent
+TE_ROOT = FIG_DIR.parent
+CSV_DIR = TE_ROOT / "csv_files"
+OUTPUT_PATH = FIG_DIR / "appNB.pdf"
+
+# Input CSV produced by appNB.jl
+CSV_BASENAME = "appNB_s:0.0001_N:10000_beta:0.026_delta:0.006_R:free_exp"
+
+MAX_GENERATIONS_TO_PLOT = 2000  # None = all generations
+SIM_BURN_IN = 2000
+SIM_SAMPLE_EVERY = 100
+
+csv_path = CSV_DIR / f"{CSV_BASENAME}.csv"
+if not csv_path.is_file():
+    print(f"CSV not found: {csv_path}")
+    print("Run appNB.jl first, or change CSV_BASENAME.")
+    raise SystemExit(1)
+
+data = pd.read_csv(csv_path)
+
+mean_styles_approx = {
+    "Simulated Mean": {"color": "#0173B2", "linestyle": "-", "linewidth": 5.5},
+    "Approx Mean": {"color": "red", "linestyle": "-", "linewidth": 5.2},
+}
+
+variance_styles_approx = {
+    "Simulated Variance": {"color": "#4B0082", "linestyle": "-", "linewidth": 1.9},
+    "Approx Variance": {"color": "#000000", "linestyle": "-", "linewidth": 6.5},
+    "Charles Mean": {"color": "#299438", "linestyle": "--", "linewidth": 6.5},
+}
+
+mean_styles_nb = {
+    "Simulated Mean": {"color": "#0173B2", "linestyle": "-", "linewidth": 5.5},
+    "NB Mean": {"color": "red", "linestyle": "-", "linewidth": 5.5},
+}
+
+variance_styles_nb = {
+    "Simulated Variance": {"color": "#4B0082", "linestyle": "-", "linewidth": 1.8},
+    "NB Variance": {"color": "#000000", "linestyle": "-", "linewidth": 6.5},
+    "Charles Mean": {"color": "#299438", "linestyle": "--", "linewidth": 6.7},
+}
+
+
+def summarize_simulation(data):
+    if MAX_GENERATIONS_TO_PLOT is not None:
+        data = data.iloc[:MAX_GENERATIONS_TO_PLOT]
+
+    simulated_mean = data["Mean_X_Count"]
+    simulated_variance = data["Sim_Variance"]
+
+    indices_mean = np.arange(SIM_BURN_IN, len(simulated_mean), SIM_SAMPLE_EVERY)
+    indices_var = np.arange(SIM_BURN_IN, len(simulated_variance), SIM_SAMPLE_EVERY)
+    mean_piecewise = simulated_mean.iloc[indices_mean]
+    variance_piecewise = simulated_variance.iloc[indices_var]
+
+    return {
+        "Mean": mean_piecewise.mean(),
+        "Var.": variance_piecewise.mean(),
+        "Skew.": data["Sim_Skewness"].iloc[-1],
+        "Ex. Kurt.": data["Sim_Excess_kurtosis"].iloc[-1],
+    }
+
+
+def print_summary_table(data):
+    if MAX_GENERATIONS_TO_PLOT is not None:
+        data = data.iloc[:MAX_GENERATIONS_TO_PLOT]
+
+    sim_summary = summarize_simulation(data)
+    approx_mean = data["Approx_Mean"].iloc[-1]
+    approx_variance = data["Approx_Variance"].iloc[-1]
+    nb_mean = data["NB_Mean"].iloc[-1]
+    nb_variance = data["NB_Variance"].iloc[-1]
+    nb_skew = data["NB_Skewness"].iloc[-1]
+    nb_ex_kurt = data["NB_Excess_Kurtosis"].iloc[-1]
+    charles_mean = data["Charles_Mean"].iloc[-1]
+
+    summary_df = pd.DataFrame(
+        {
+            "Mean": [sim_summary["Mean"], nb_mean, approx_mean, charles_mean],
+            "Var.": [sim_summary["Var."], nb_variance, approx_variance, charles_mean],
+            "Skew.": [
+                sim_summary["Skew."],
+                nb_skew,
+                np.nan,
+                1 / np.sqrt(charles_mean) if charles_mean > 0 else np.nan,
+            ],
+            "Ex. Kurt.": [
+                sim_summary["Ex. Kurt."],
+                nb_ex_kurt,
+                np.nan,
+                1 / charles_mean if charles_mean > 0 else np.nan,
+            ],
+        },
+        index=[
+            "Stochastic sim.",
+            "Theory (neg. bin.)",
+            "Theory (approx.)",
+            "Ch. & Ch. (1983)",
+        ],
+    )
+
+    print("\nSummary table:\n")
+    print(summary_df.to_string(float_format=lambda x: f"{x:.2f}", na_rep="---"))
+
+
+def plot_approx(data, ax, title):
+    if MAX_GENERATIONS_TO_PLOT is not None:
+        data = data.iloc[:MAX_GENERATIONS_TO_PLOT]
+
+    generation = data["generation"]
+    simulated_mean = data["Mean_X_Count"]
+    approx_mean = data["Approx_Mean"]
+    simulated_variance = data["Sim_Variance"]
+    approx_variance = data["Approx_Variance"]
+    charles_mean = data["Charles_Mean"]
+
+    ax.plot(generation, approx_mean, label="Theoretical Mean", **mean_styles_approx["Approx Mean"])
+    ax.plot(
+        generation,
+        simulated_mean,
+        label="Simulated Mean",
+        **mean_styles_approx["Simulated Mean"],
+        alpha=0.9,
+    )
+    ax.plot(
+        generation,
+        simulated_variance,
+        label="Simulated Variance",
+        **variance_styles_approx["Simulated Variance"],
+        alpha=0.85,
+    )
+    ax.plot(
+        generation,
+        approx_variance,
+        label="Theoretical Variance",
+        **variance_styles_approx["Approx Variance"],
+    )
+    ax.plot(
+        generation,
+        charles_mean,
+        label="Charlesworth (1983) Mean",
+        **variance_styles_approx["Charles Mean"],
+    )
+
+    ax.set_xlabel("Generation", fontsize=22, fontweight="bold")
+    ax.set_ylabel("Copy number", fontsize=25, fontweight="bold")
+    ax.set_title(title, fontsize=20, fontweight="bold", pad=5)
+    ax.grid(True, linestyle="--", alpha=0, linewidth=0.5)
+    ax.tick_params(axis="both", which="major", labelsize=17, width=2)
+    for label in ax.get_xticklabels() + ax.get_yticklabels():
+        label.set_fontweight("bold")
+
+
+def plot_nb(data, ax, title):
+    if MAX_GENERATIONS_TO_PLOT is not None:
+        data = data.iloc[:MAX_GENERATIONS_TO_PLOT]
+
+    generation = data["generation"]
+    simulated_mean = data["Mean_X_Count"]
+    nb_mean = data["NB_Mean"]
+    simulated_variance = data["Sim_Variance"]
+    nb_variance = data["NB_Variance"]
+    charles_mean = data["Charles_Mean"]
+
+    ax.plot(generation, nb_mean, label="Theoretical Mean", **mean_styles_nb["NB Mean"])
+    ax.plot(
+        generation,
+        simulated_mean,
+        label="Simulated Mean",
+        **mean_styles_nb["Simulated Mean"],
+        alpha=0.9,
+    )
+    ax.plot(
+        generation,
+        simulated_variance,
+        label="Simulated Variance",
+        **variance_styles_nb["Simulated Variance"],
+        alpha=0.85,
+    )
+    ax.plot(
+        generation,
+        nb_variance,
+        label="Theoretical Variance",
+        **variance_styles_nb["NB Variance"],
+    )
+    ax.plot(
+        generation,
+        charles_mean,
+        label="Charlesworth (1983) Mean",
+        **variance_styles_nb["Charles Mean"],
+    )
+
+    ax.set_xlabel("Generation", fontsize=22, fontweight="bold")
+    ax.set_title(title, fontsize=20, fontweight="bold", pad=5)
+    ax.grid(True, linestyle="--", alpha=0, linewidth=0.5)
+    ax.tick_params(axis="both", which="major", labelsize=17, width=2)
+    for label in ax.get_xticklabels() + ax.get_yticklabels():
+        label.set_fontweight("bold")
+
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 7), dpi=120)
+
+plot_approx(data, ax1, r"$\bf{Approximate\ closure}$")
+plot_nb(data, ax2, r"$\bf{Negative\ binomial\ closure}$")
+print_summary_table(data)
+
+plt.tight_layout()
+plt.savefig(OUTPUT_PATH, bbox_inches="tight")
+print(f"\nSaved figure to: {OUTPUT_PATH}")
+plt.show()
