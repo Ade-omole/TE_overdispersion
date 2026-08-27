@@ -105,7 +105,7 @@ plot_data_group(
     "Excess Kurtosis Value",
 )
 
-# Piecewise averages for simulated skewness and excess kurtosis (same burn-in as appNBfig.py)
+# Piecewise averages, same burn-in as appNBfig.py
 if MAX_GENERATIONS_TO_PLOT is not None:
     df_summary = df.iloc[:MAX_GENERATIONS_TO_PLOT]
 else:

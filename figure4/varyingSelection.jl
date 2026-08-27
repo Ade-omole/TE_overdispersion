@@ -1,5 +1,4 @@
 # Sweep selection coefficient s in fitness w(n) = exp(-s n^2).
-# Roze (2023): beta = 2s (CSV column beta). Keep s_list in sync with varyingSelection.py.
 
 using Random, Distributions, CSV, DataFrames, Statistics, Printf
 

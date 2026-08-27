@@ -1,10 +1,10 @@
-"""Plot dispersion ratio rho versus map length R (varying-R sweep)."""
+"""Plot dispersion ratio versus recombination map length R."""
 
 from pathlib import Path
 
+import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 from matplotlib.ticker import AutoMinorLocator, FuncFormatter, LogFormatterMathtext, NullLocator
 from scipy.interpolate import make_interp_spline
 
@@ -13,49 +13,65 @@ TE_ROOT = FIG_DIR.parent
 CSV_DIR = TE_ROOT / "csv_files"
 OUTPUT_PATH = FIG_DIR / "varyingRFig.pdf"
 
-# Input CSV basenames (without fitness suffix); produced by varyingRsim.jl.
-CSV_BASENAME_PRIMARY = "sweep_R_roze_topright_burnin_binomial"
-CSV_BASENAME_SIM_ECT = "sweep_R_ectFitRoze_burnin_binomial"
-FITNESS = "exp"  # "exp" or "syn"
+# ----- Configure CSV to load (change basename to use another file)
+CSV_BASENAME_PRIMARY = "sweep_R_topright_burnin_binomial_pre"  # main text
+CSV_BASENAME_SIM_ECT = "sweep_R_ectFit_burnin_binomial_pre" # main text; also carries the m0 columns
+
+FITNESS = "exp"                 # "exp" or "syn"
+
+# ----- Life-cycle stage for our theory curves
+LIFE_STAGE = "pre"             # "post" or "pre"
 
 csv_path = CSV_DIR / f"{CSV_BASENAME_PRIMARY}_{FITNESS}.csv"
 if not csv_path.is_file():
     print(f"CSV not found: {csv_path}")
-    print("Run varyingRsim.jl first, or change CSV_BASENAME_PRIMARY / FITNESS.")
+    print("Run varyingRsim.jl first, or change CSV_BASENAME_PRIMARY / FITNESS at the top of this script.")
     raise SystemExit(1)
 
 df = pd.read_csv(csv_path)
 print(f"Loaded {csv_path}, shape {df.shape}")
 
+# The ectFit series is optional: if its CSV is missing the figure is still
 csv_path_ect = CSV_DIR / f"{CSV_BASENAME_SIM_ECT}_{FITNESS}.csv"
-if not csv_path_ect.is_file():
+has_ect = csv_path_ect.is_file()
+if has_ect:
+    df_ect = pd.read_csv(csv_path_ect)
+    print(f"Loaded {csv_path_ect}, shape {df_ect.shape}")
+    if len(df["R"]) != len(df_ect["R"]) or not np.allclose(df["R"].values, df_ect["R"].values):
+        print("Warning: R grids differ between primary and ectFit CSVs; ect simulation uses df_ect R/sim_p.")
+else:
+    df_ect = None
     print(f"CSV not found: {csv_path_ect}")
-    print("Add the ectFitRoze sweep CSV or change CSV_BASENAME_SIM_ECT / FITNESS.")
-    raise SystemExit(1)
-
-df_ect = pd.read_csv(csv_path_ect)
-print(f"Loaded {csv_path_ect}, shape {df_ect.shape}")
-if len(df["R"]) != len(df_ect["R"]) or not np.allclose(df["R"].values, df_ect["R"].values):
-    print("Warning: R grids differ between primary and ectFitRoze CSVs; ect simulation uses df_ect R/sim_p.")
+    print("Run sweep_R_ectFit.jl (or change CSV_BASENAME_SIM_ECT); "
+          "skipping that simulation series.")
 
 R = df["R"].values
 
 sim_p = df["sim_p"].values
-sim_p_ect = df_ect["sim_p"].values
+sim_p_ect = df_ect["sim_p"].values if has_ect else None
 app_p = df["app_p"].values
 nb_p = df["nb_p"].values
 has_rho_numerical = "rho_numerical" in df.columns
 if has_rho_numerical:
     rho_numerical = df["rho_numerical"].values
 
-# Plot styling
+# Pre-transposition/excision (m') simulation moments, written by varyingRsim.jl.
+PRE_SIM_COL = "sim_p_m0"
+has_sim_pre = PRE_SIM_COL in df.columns
+has_sim_pre_ect = has_ect and PRE_SIM_COL in df_ect.columns
+if has_sim_pre:
+    sim_p_pre = df[PRE_SIM_COL].values
+if has_sim_pre_ect:
+    sim_p_pre_ect = df_ect[PRE_SIM_COL].values
+
+# ----- Visual style (match left panel of varyingRateFig.py)
 LEFT_SIM_MARKER_SIZE = 7
-THEORY_LINEWIDTH = 4.0
+THEORY_LINEWIDTH = 4.0  # approximate, parametric, Roze — thinner than old 6pt default
 MARKER_EDGEWIDTH = 2.5
 
-TICK_LABELSIZE = 15
+TICK_LABELSIZE = 15  # x- and y-axis tick numbers (same size)
 LEGEND_FONTSIZE = 16
-AXIS_LABELSIZE = 20
+AXIS_LABELSIZE = 20  # x- and y-axis titles (same size)
 
 SHOW_VERTICAL_GRID = True
 VERTICAL_GRID_ALPHA = 0.18
@@ -66,21 +82,18 @@ SHOW_HORIZONTAL_GRID = True
 HORIZONTAL_GRID_ALPHA = 0.18
 HORIZONTAL_GRID_LINESTYLE = "-"
 HORIZONTAL_GRID_LINEWIDTH = 0.8
-Y_MINOR_SUBDIVISIONS = 5
+Y_MINOR_SUBDIVISIONS = 5  # minor ticks between each major y tick (linear ρ axis)
 HORIZONTAL_MINOR_GRID_ALPHA = 0.10
 HORIZONTAL_MINOR_GRID_LINESTYLE = ":"
 HORIZONTAL_MINOR_GRID_LINEWIDTH = 0.55
 
+# Sorted x for theoretical lines
 idx_sort = np.argsort(R)
 x_line = R[idx_sort]
 
 
 def smooth_log_spline(x_sorted, y_sorted, n_interp=500):
-    """
-    Fit a cubic spline in log10(x) space and evaluate on a fine grid,
-    returning (x_fine, y_fine) for smooth plotting on a log x-axis.
-    Requires at least 4 unique points; falls back to raw data if fewer.
-    """
+    """Fit a cubic spline in log10(x) space and evaluate on a fine grid,"""
     log_x = np.log10(x_sorted)
     _, unique_idx = np.unique(log_x, return_index=True)
     log_x_u = log_x[unique_idx]
@@ -105,11 +118,12 @@ def _format_log_x_major(x, pos):
     return _log_x_major_fallback(x, pos)
 
 
-color_nb = "#2ca02c"
-color_app = "#9467bd"
-color_sim_p = "#d62728"
-color_sim_ect = "#B8860B"
-color_roze = "#0173B2"
+# ----- Dispersion ratio ρ vs R (map length); y = 1/p = variance/mean
+color_nb = "#2ca02c"      # parametric (NB): green
+color_app = "#9467bd"     # approximate: purple
+color_sim_p = "#d62728"   # simulation ($e^{-n^2}$): red
+color_sim_ect = "#B8860B"  # simulation ($w=e^{-\beta n_p}$): deep yellow (darkgoldenrod)
+color_roze = "#0173B2"    # Roze (2023): blue
 
 line_kwargs = dict(
     linestyle="-",
@@ -122,8 +136,53 @@ line_kwargs = dict(
 
 fig, ax = plt.subplots(figsize=(10, 6), dpi=120)
 
-inv_app_p = np.array([1.0 / max(p, 1e-12) for p in app_p])
-inv_nb_p = np.array([1.0 / max(p, 1e-12) for p in nb_p])
+if LIFE_STAGE == "post":
+    inv_app_p = np.array([1.0 / max(p, 1e-12) for p in app_p])
+    inv_nb_p = np.array([1.0 / max(p, 1e-12) for p in nb_p])
+
+    sim_rho = 1.0 / sim_p
+    sim_rho_ect = 1.0 / sim_p_ect if has_ect else None
+
+elif LIFE_STAGE == "pre":
+    u_arr = df["u"].values
+    v_arr = df["v"].values
+    nb_mu = df["nb_μ"].values
+    nb_var = df["nb_σ²"].values
+    app_var = df["app_σ²"].values
+
+    # s is not stored in the CSV; recover it from the approximate-closure
+    s_arr = (u_arr - v_arr) / (2.0 * app_var)
+    net = u_arr - v_arr
+
+    # Approximate closure, Suppl. S4.2 ratio.
+    inv_app_p = (1.0 + 2.0 * v_arr) / (1.0 - 2.0 * u_arr + 2.0 * v_arr)
+
+    # Parametric (NB) closure, Eq. (23) as a ratio, unexpanded in mu and sigma^2.
+    inv_nb_p = (
+        nb_mu + nb_var * (1.0 - 3.0 * net) + s_arr * nb_var**2 / nb_mu
+    ) / (2.0 * nb_mu * (1.0 - net))
+
+    # Simulation markers at the same stage, from varyingRsim.jl's m0 columns.
+    if has_sim_pre:
+        sim_rho = 1.0 / sim_p_pre
+    else:
+        sim_rho = None
+        print(f"Warning: '{PRE_SIM_COL}' not in {CSV_BASENAME_PRIMARY}; "
+              "re-run varyingRsim.jl. Skipping that simulation series.")
+    if has_sim_pre_ect:
+        sim_rho_ect = 1.0 / sim_p_pre_ect
+    else:
+        sim_rho_ect = None
+        if has_ect:
+            print(f"Warning: '{PRE_SIM_COL}' not in {CSV_BASENAME_SIM_ECT}; "
+                  "re-run sweep_R_ectFit.jl. Skipping that simulation series.")
+
+else:
+    raise ValueError(f"LIFE_STAGE must be 'post' or 'pre', got {LIFE_STAGE!r}")
+
+print(f"{LIFE_STAGE}-transposition/excision stage: "
+      f"rho_app = {inv_app_p[0]:.6f}, rho_nb = {inv_nb_p[0]:.6f}"
+      + (f", rho_sim = {sim_rho[0]:.6f}" if sim_rho is not None else ", rho_sim = skipped"))
 
 x_smooth_app, y_smooth_app = smooth_log_spline(x_line, inv_app_p[idx_sort])
 x_smooth_nb, y_smooth_nb = smooth_log_spline(x_line, inv_nb_p[idx_sort])
@@ -134,29 +193,31 @@ if has_rho_numerical:
     x_roze_s, y_roze_s = smooth_log_spline(x_line, rho_numerical[idx_sort])
     ax.plot(x_roze_s, y_roze_s, color=color_roze, label="Roze (2023)", **line_kwargs)
 
-ax.scatter(
-    R,
-    1.0 / sim_p,
-    marker="o",
-    s=LEFT_SIM_MARKER_SIZE**2,
-    zorder=12,
-    color=color_sim_p,
-    edgecolors=color_sim_p,
-    linewidths=MARKER_EDGEWIDTH,
-    label=r"Simulation ($w = e^{-sn^2}$)",
-)
-R_ect = df_ect["R"].values
-ax.scatter(
-    R_ect,
-    1.0 / sim_p_ect,
-    marker="o",
-    s=LEFT_SIM_MARKER_SIZE**2,
-    zorder=10,
-    color=color_sim_ect,
-    edgecolors=color_sim_ect,
-    linewidths=MARKER_EDGEWIDTH,
-    label=r"Simulation ($w = e^{-\beta n_p}$)",
-)
+if sim_rho is not None:
+    ax.scatter(
+        R,
+        sim_rho,
+        marker="o",
+        s=LEFT_SIM_MARKER_SIZE**2,
+        zorder=12,
+        color=color_sim_p,
+        edgecolors=color_sim_p,
+        linewidths=MARKER_EDGEWIDTH,
+        label=r"Simulation ($w = e^{-sn^2}$)",
+    )
+R_ect = df_ect["R"].values if has_ect else None
+if sim_rho_ect is not None:
+    ax.scatter(
+        R_ect,
+        sim_rho_ect,
+        marker="o",
+        s=LEFT_SIM_MARKER_SIZE**2,
+        zorder=10,
+        color=color_sim_ect,
+        edgecolors=color_sim_ect,
+        linewidths=MARKER_EDGEWIDTH,
+        label=r"Simulation ($w = e^{-\beta n_p}$)",
+    )
 
 ax.set_xscale("log")
 ax.xaxis.set_major_formatter(FuncFormatter(_format_log_x_major))
@@ -202,5 +263,5 @@ ax.legend(loc="best", prop={"size": LEGEND_FONTSIZE, "weight": "bold"})
 
 plt.tight_layout()
 plt.savefig(OUTPUT_PATH, bbox_inches="tight")
-print(f"Saved figure: {OUTPUT_PATH}")
+print(f"Figure saved to: {OUTPUT_PATH}")
 plt.show()

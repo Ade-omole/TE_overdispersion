@@ -6,6 +6,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+# ----- Theory source
+# "numeric"  -> integrated closure trajectories from the CSV (reproduces Fig. 1)
+# "analytic" -> closed-form equilibria, drawn as flat reference lines
+THEORY_SOURCE = "numeric"
+
 FIG_DIR = Path(__file__).resolve().parent
 TE_ROOT = FIG_DIR.parent
 CSV_DIR = TE_ROOT / "csv_files"
@@ -25,6 +30,44 @@ if not csv_path.is_file():
     raise SystemExit(1)
 
 data = pd.read_csv(csv_path)
+
+
+# Rates used by the analytic expressions; must match the simulation CSV
+U_RATE, V_RATE, S_SEL = 0.026, 0.006, 1e-4
+
+
+def analytic_equilibria(u=U_RATE, v=V_RATE, s=S_SEL):
+    """Closed-form equilibria from main_rev2 for Gaussian fitness w(n)=exp(-s n^2)."""
+    mu_app = (u - v) * (1 - 2 * (u - v)) / (2 * s * (2 * u + 2 * v + 1))
+    var_app = (u - v) / (2 * s)
+
+    rho_nb = 1 + 3 * u + v
+    mu_nb = (u - v) / (2 * s * rho_nb) - 0.5 - 3 * u - v
+    var_nb = rho_nb * mu_nb
+
+    skew_nb = (1 + 6 * u + 2 * v) / np.sqrt(var_nb)
+    exkurt_nb = (1 + 6 * (3 * u + v) + 6 * (3 * u + v) ** 2) / var_nb
+
+    return {
+        "mu_app": mu_app, "var_app": var_app,
+        "mu_nb": mu_nb, "var_nb": var_nb, "rho_nb": rho_nb,
+        "skew_nb": skew_nb, "exkurt_nb": exkurt_nb,
+        "charles": (u - v) / (2 * s),
+    }
+
+
+def theory_series(data, kind):
+    """Return (mean, variance, charles) for one closure, honouring THEORY_SOURCE."""
+    n = len(data)
+    if THEORY_SOURCE == "analytic":
+        eq = analytic_equilibria()
+        m, var = (eq["mu_app"], eq["var_app"]) if kind == "approx" else (eq["mu_nb"], eq["var_nb"])
+        const = lambda x: pd.Series(np.full(n, x), index=data.index)
+        return const(m), const(var), const(eq["charles"])
+    if kind == "approx":
+        return data["Approx_Mean"], data["Approx_Variance"], data["Charles_Mean"]
+    return data["NB_Mean"], data["NB_Variance"], data["Charles_Mean"]
+
 
 mean_styles_approx = {
     "Simulated Mean": {"color": "#0173B2", "linestyle": "-", "linewidth": 5.5},
@@ -50,37 +93,33 @@ variance_styles_nb = {
 
 
 def summarize_simulation(data):
-    if MAX_GENERATIONS_TO_PLOT is not None:
-        data = data.iloc[:MAX_GENERATIONS_TO_PLOT]
-
-    simulated_mean = data["Mean_X_Count"]
-    simulated_variance = data["Sim_Variance"]
-
-    indices_mean = np.arange(SIM_BURN_IN, len(simulated_mean), SIM_SAMPLE_EVERY)
-    indices_var = np.arange(SIM_BURN_IN, len(simulated_variance), SIM_SAMPLE_EVERY)
-    mean_piecewise = simulated_mean.iloc[indices_mean]
-    variance_piecewise = simulated_variance.iloc[indices_var]
-
+    # Equilibrium values use the full run, not the plotting window:
+    # samples every SIM_SAMPLE_EVERY generations after SIM_BURN_IN.
+    idx = np.arange(SIM_BURN_IN, len(data), SIM_SAMPLE_EVERY)
     return {
-        "Mean": mean_piecewise.mean(),
-        "Var.": variance_piecewise.mean(),
-        "Skew.": data["Sim_Skewness"].iloc[-1],
-        "Ex. Kurt.": data["Sim_Excess_kurtosis"].iloc[-1],
+        "Mean": data["Mean_X_Count"].iloc[idx].mean(),
+        "Var.": data["Sim_Variance"].iloc[idx].mean(),
+        "Skew.": data["Sim_Skewness"].iloc[idx].mean(),
+        "Ex. Kurt.": data["Sim_Excess_kurtosis"].iloc[idx].mean(),
     }
 
 
 def print_summary_table(data):
-    if MAX_GENERATIONS_TO_PLOT is not None:
-        data = data.iloc[:MAX_GENERATIONS_TO_PLOT]
-
     sim_summary = summarize_simulation(data)
-    approx_mean = data["Approx_Mean"].iloc[-1]
-    approx_variance = data["Approx_Variance"].iloc[-1]
-    nb_mean = data["NB_Mean"].iloc[-1]
-    nb_variance = data["NB_Variance"].iloc[-1]
-    nb_skew = data["NB_Skewness"].iloc[-1]
-    nb_ex_kurt = data["NB_Excess_Kurtosis"].iloc[-1]
-    charles_mean = data["Charles_Mean"].iloc[-1]
+    if THEORY_SOURCE == "analytic":
+        eq = analytic_equilibria()
+        approx_mean, approx_variance = eq["mu_app"], eq["var_app"]
+        nb_mean, nb_variance = eq["mu_nb"], eq["var_nb"]
+        nb_skew, nb_ex_kurt = eq["skew_nb"], eq["exkurt_nb"]
+        charles_mean = eq["charles"]
+    else:
+        approx_mean = data["Approx_Mean"].iloc[-1]
+        approx_variance = data["Approx_Variance"].iloc[-1]
+        nb_mean = data["NB_Mean"].iloc[-1]
+        nb_variance = data["NB_Variance"].iloc[-1]
+        nb_skew = data["NB_Skewness"].iloc[-1]
+        nb_ex_kurt = data["NB_Excess_Kurtosis"].iloc[-1]
+        charles_mean = data["Charles_Mean"].iloc[-1]
 
     summary_df = pd.DataFrame(
         {
@@ -111,16 +150,25 @@ def print_summary_table(data):
     print(summary_df.to_string(float_format=lambda x: f"{x:.2f}", na_rep="---"))
 
 
+def add_legend(ax):
+    ax.legend(loc="lower right", prop={"size": 13, "weight": "bold"}, framealpha=0.9)
+
+
+def panel_label(ax, letter):
+    ax.text(
+        -0.06, 1.06, letter, transform=ax.transAxes,
+        fontsize=24, fontweight="bold", va="top", ha="right",
+    )
+
+
 def plot_approx(data, ax, title):
     if MAX_GENERATIONS_TO_PLOT is not None:
         data = data.iloc[:MAX_GENERATIONS_TO_PLOT]
 
     generation = data["generation"]
     simulated_mean = data["Mean_X_Count"]
-    approx_mean = data["Approx_Mean"]
     simulated_variance = data["Sim_Variance"]
-    approx_variance = data["Approx_Variance"]
-    charles_mean = data["Charles_Mean"]
+    approx_mean, approx_variance, charles_mean = theory_series(data, "approx")
 
     ax.plot(generation, approx_mean, label="Theoretical Mean", **mean_styles_approx["Approx Mean"])
     ax.plot(
@@ -157,6 +205,8 @@ def plot_approx(data, ax, title):
     ax.tick_params(axis="both", which="major", labelsize=17, width=2)
     for label in ax.get_xticklabels() + ax.get_yticklabels():
         label.set_fontweight("bold")
+    add_legend(ax)
+    panel_label(ax, "a")
 
 
 def plot_nb(data, ax, title):
@@ -165,10 +215,8 @@ def plot_nb(data, ax, title):
 
     generation = data["generation"]
     simulated_mean = data["Mean_X_Count"]
-    nb_mean = data["NB_Mean"]
     simulated_variance = data["Sim_Variance"]
-    nb_variance = data["NB_Variance"]
-    charles_mean = data["Charles_Mean"]
+    nb_mean, nb_variance, charles_mean = theory_series(data, "nb")
 
     ax.plot(generation, nb_mean, label="Theoretical Mean", **mean_styles_nb["NB Mean"])
     ax.plot(
@@ -204,6 +252,8 @@ def plot_nb(data, ax, title):
     ax.tick_params(axis="both", which="major", labelsize=17, width=2)
     for label in ax.get_xticklabels() + ax.get_yticklabels():
         label.set_fontweight("bold")
+    add_legend(ax)
+    panel_label(ax, "b")
 
 
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 7), dpi=120)

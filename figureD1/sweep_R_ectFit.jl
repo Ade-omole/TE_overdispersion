@@ -1,45 +1,48 @@
-# Sweep the transposition rate u at fixed v under free recombination.
+# Sweep map length R under the Roze (2023) ectopic-pair fitness w = exp(-beta * n_ecto).
 
-using Random, Distributions, CSV, DataFrames, Statistics, Printf
+using Random, Distributions, CSV, DataFrames, Statistics, Printf, QuadGK
 
 # Configuration
-const FITNESS = "exp"
-const FREE_RECOMBINATION = true   # true: binomial assortment (matches theory) | false: R; crossovers map distance
+const FITNESS = "exp" # ectopic roze
+const THEORY_FITNESS = "exp"   # for μ_app, σ²_app, and NB ODE: ln w = -s n²
+const u_val = 10^-2
+const v_val = u_val / 100
+const α_for_rho = 0.0   # α in ρ formula: ρ ≈ 1 + (ε₁/(1-uε₁)) * ((u+v+α)/2). Set 0 or change as needed.
 
-const population_size = 10000
+const population_size = 10^4
 const num_diploid_pairs = 1
-const generations = 50000
+const generations = 30000
 const n_init_param = 10
-const R = 10.0
-const s_val = 1.0 / population_size
+# Simulation: β in w = exp(-β · n_ecto) (α = 0).
+const β_ect = u_val / 10
+# Theory (approx + NB) uses s in w = exp(-s n^2), independent of beta_ect
+const s_val = u_val / 20
 const dt = 1.0
 
 # u/v event model (switch with one constant)
 const UV_EVENT_MODEL = :binomial  # :poisson or :binomial
 
 if UV_EVENT_MODEL == :poisson
-    transposition_k(u::Float64, n::Int) = n > 0 ? rand(Poisson(u * n * dt)) : 0
-    excision_k(v::Float64, n::Int) = n > 0 ? rand(Poisson(v * n * dt)) : 0
+    transposition_k(n::Int) = n > 0 ? rand(Poisson(u_val * n * dt)) : 0
+    excision_k(n::Int) = n > 0 ? rand(Poisson(v_val * n * dt)) : 0
 elseif UV_EVENT_MODEL == :binomial
-    # Each copy experiences an event independently with probability p ≈ rate*dt.
-    transposition_k(u::Float64, n::Int) = n > 0 ? rand(Binomial(n, clamp(u * dt, 0.0, 1.0))) : 0
-    excision_k(v::Float64, n::Int) = n > 0 ? rand(Binomial(n, clamp(v * dt, 0.0, 1.0))) : 0
+    transposition_k(n::Int) = n > 0 ? rand(Binomial(n, clamp(u_val * dt, 0.0, 1.0))) : 0
+    excision_k(n::Int) = n > 0 ? rand(Binomial(n, clamp(v_val * dt, 0.0, 1.0))) : 0
 else
     error("UV_EVENT_MODEL must be :poisson or :binomial (got $UV_EVENT_MODEL)")
 end
 
-const v_const = 0.0001
-const u_values = [0.0005, 0.001, 0.0015, 0.0022, 0.003, 0.004, 0.005, 0.006, 0.008, 0.01, 0.012, 0.016, 0.02, 0.026, 0.032, 0.04, 0.05, 0.07, 0.08]
-const v_values = fill(v_const, length(u_values))
+const R_values = [10.0^k for k in -5:3]
 
 const te_root = dirname(@__DIR__)
 const csv_dir = joinpath(te_root, "csv_files")
-
-const CSV_BASENAME = "sweep_u_more_values_vConst:0.0001_6_$UV_EVENT_MODEL"
-mkpath(csv_dir)
+const CSV_BASENAME = "sweep_R_ectFit_burnin_binomial_pre"
+mkpath(csv_dir)s
 
 const t0_pw = 9000
 const k_pw = 100
+
+# no burn-in
 
 # Roze-style simulation
 function create_individual_roze()
@@ -51,16 +54,16 @@ function create_individual_roze()
     return (chrom1, chrom2)
 end
 
-# Faster excision: no shuffle(1:n) and no repeated deleteat!
-function apply_excision_roze!(chrom1::Vector{Float64}, chrom2::Vector{Float64}, v_val::Float64, dt_step::Float64)
+function apply_excision_roze!(chrom1, chrom2)
     n_total = length(chrom1) + length(chrom2)
-    num_del_total = excision_k(v_val, n_total)
+    num_del_total = excision_k(n_total)
     if num_del_total <= 0 || n_total == 0
         return nothing
     end
 
     n1 = length(chrom1)
     n2 = length(chrom2)
+
     frac1 = n1 / n_total
     n1_del = min(rand(Binomial(num_del_total, frac1)), n1)
     n2_del = min(num_del_total - n1_del, n2)
@@ -76,8 +79,8 @@ function apply_excision_roze!(chrom1::Vector{Float64}, chrom2::Vector{Float64}, 
 
         k = n - d
         sample_keep = k <= d
-        m = sample_keep ? k : d
 
+        m = sample_keep ? k : d
         selected = Set{Int}()
         sizehint!(selected, m)
         for j in (n - m + 1):n
@@ -106,61 +109,71 @@ function apply_excision_roze!(chrom1::Vector{Float64}, chrom2::Vector{Float64}, 
     return nothing
 end
 
-function apply_transposition_roze!(chrom1::Vector{Float64}, chrom2::Vector{Float64}, u_val::Float64, dt_step::Float64, n_initial::Int)
-    k = transposition_k(u_val, n_initial)
+function apply_transposition_roze!(chrom1, chrom2, n_initial::Int)
+    k = transposition_k(n_initial)
     for _ in 1:k
         push!(rand(1:2) == 1 ? chrom1 : chrom2, rand())
     end
     return nothing
 end
 
-function meiosis_roze(chrom1::Vector{Float64}, chrom2::Vector{Float64})
-    if FREE_RECOMBINATION
-        # Independent assortment per TE, without concat+shuffle (faster, exact).
-        g1 = Float64[]
-        g2 = Float64[]
-        sizehint!(g1, length(chrom1) + length(chrom2))
-        sizehint!(g2, length(chrom1) + length(chrom2))
-        @inbounds for p in chrom1
-            (rand(Bool) ? push!(g1, p) : push!(g2, p))
-        end
-        @inbounds for p in chrom2
-            (rand(Bool) ? push!(g1, p) : push!(g2, p))
-        end
-        return (g1, g2)
-    end
-
-    n_cross = rand(Poisson(R))
+function meiosis_roze(chrom1, chrom2, R_val::Float64)
+    n_cross = rand(Poisson(R_val))
     if n_cross == 0
         return (chrom1, chrom2)
     end
-    xovers = sort(rand(n_cross))
+    xovers = n_cross > 0 ? sort(rand(n_cross)) : Float64[]
     g1, g2 = Float64[], Float64[]
-    sizehint!(g1, length(chrom1) + length(chrom2))
-    sizehint!(g2, length(chrom1) + length(chrom2))
-    @inbounds for p in chrom1
+    for p in chrom1
         seg = searchsortedfirst(xovers, p)
         isodd(seg) ? push!(g1, p) : push!(g2, p)
     end
-    @inbounds for p in chrom2
+    for p in chrom2
         seg = searchsortedfirst(xovers, p)
         iseven(seg) ? push!(g1, p) : push!(g2, p)
     end
     return (g1, g2)
 end
 
-function fitness_val(x_total, fit_type::String)
-    fit_type == "exp" ? exp(-s_val * x_total^2) : max(0.0, 1.0 - s_val * x_total^2)
+"""Count insertion sites shared by both homologs (exact float equality), after sorting each chromosome."""
+function count_homozygous_te_sites(chrom1::Vector{Float64}, chrom2::Vector{Float64})
+    (isempty(chrom1) || isempty(chrom2)) && return 0
+    s1 = sort(chrom1)
+    s2 = sort(chrom2)
+    n_hom = 0
+    a, b = 1, 1
+    n1, n2 = length(s1), length(s2)
+    @inbounds while a <= n1 && b <= n2
+        if s1[a] < s2[b]
+            a += 1
+        elseif s1[a] > s2[b]
+            b += 1
+        else
+            n_hom += 1
+            a += 1
+            b += 1
+        end
+    end
+    return n_hom
 end
 
-function form_offspring_roze(parent1, parent2, u_val::Float64, v_val::Float64)
-    g1_p1, g2_p1 = meiosis_roze(parent1[1], parent1[2])
-    g1_p2, g2_p2 = meiosis_roze(parent2[1], parent2[2])
+"""Roze fitness with α = 0: w = exp(-β · n_ecto), n_ecto = C(n,2) - n_hom."""
+function fitness_ectopic_roze(chrom1::Vector{Float64}, chrom2::Vector{Float64}, β::Float64)
+    n = length(chrom1) + length(chrom2)
+    n < 2 && return 1.0
+    n_hom = count_homozygous_te_sites(chrom1, chrom2)
+    n_ecto = div(n * (n - 1), 2) - n_hom
+    return exp(-β * n_ecto)
+end
+
+function form_offspring_roze(parent1, parent2, R_val::Float64)
+    g1_p1, g2_p1 = meiosis_roze(parent1[1], parent1[2], R_val)
+    g1_p2, g2_p2 = meiosis_roze(parent2[1], parent2[2], R_val)
     chrom1 = rand(1:2) == 1 ? copy(g1_p1) : copy(g2_p1)
     chrom2 = rand(1:2) == 1 ? copy(g1_p2) : copy(g2_p2)
-    n0 = length(chrom1) + length(chrom2)   # pre-transposition/deletion count (= m_0)
-    apply_excision_roze!(chrom1, chrom2, v_val, dt)
-    apply_transposition_roze!(chrom1, chrom2, u_val, dt, n0)
+    n0 = length(chrom1) + length(chrom2)   # pre-transposition/excision count (= m')
+    apply_excision_roze!(chrom1, chrom2)
+    apply_transposition_roze!(chrom1, chrom2, n0)
     return (chrom1, chrom2, n0)
 end
 
@@ -172,40 +185,60 @@ function d2ln_omega_dmu2(μ, s, ft::String)
     ft == "exp" ? -2.0 * s : ((-2.0 * s - 2.0 * s^2 * μ^2) / max(eps(), (1.0 - s * μ^2)^2))
 end
 
-# Run one full simulation for a given (u, v)
-function run_simulation_one_u(u_val::Float64, v_val::Float64)
+## E₁ (ε₁) for linear genetic map of length R Morgans (Roze appendix)
+function compute_E1(R_val::Float64, u_par::Float64)
+    ρ_R = u_par / max(R_val, 1e-12)
+    if R_val <= 1.0
+        half_plus_rho = 0.5 + ρ_R
+        if ρ_R <= 0.0 || half_plus_rho <= 0.0
+            return 0.0
+        end
+        return (2.0 / R_val) * ((1.0 + 2.0 * ρ_R) * (log(half_plus_rho) - log(max(ρ_R, 1e-12))) - 1.0)
+    else
+        integrand(x) = (R_val - x) / (max(eps(), (1.0 - exp(-2.0 * x)) / 2.0 + 2.0 * u_par))
+        res, _ = quadgk(integrand, 0.0, R_val; order=7)
+        return (2.0 / (R_val^2)) * res
+    end
+end
+
+function compute_rho_numerical(E1::Float64, u_par::Float64, v_par::Float64, α_par::Float64)
+    denom = 1.0 - u_par * E1
+    denom = abs(denom) < 1e-10 ? sign(denom) * 1e-10 : denom
+    return 1.0 + (E1 / denom) * ((u_par + v_par + α_par) / 2.0)
+end
+
+# Run one full simulation for a given R
+function run_simulation_one_R(R_val::Float64)
+    # Approx mean/variance for theory fitness w = exp(-s n²) (not ectopic).
     denom_app = 2.0 * s_val * (2.0 * u_val + 2.0 * v_val + 1.0)
     μ_app = denom_app > eps() ? ((u_val - v_val) * (1.0 - 2.0 * (u_val - v_val))) / denom_app : 0.0
     μ_app = max(0.0, μ_app)
     σ²_app = max(eps(), (u_val - v_val) / (2.0 * s_val))
     μ_nb = σ²_nb = 10.0
-
-    # Typed population + reusable buffers
     population = Vector{Tuple{Vector{Float64}, Vector{Float64}}}(undef, population_size)
     for i in 1:population_size
         population[i] = create_individual_roze()
     end
+
     fitness = Vector{Float64}(undef, population_size)
     cum_probs = Vector{Float64}(undef, population_size)
     m0_vals = Vector{Int}(undef, population_size)
-
     pw_mean = Float64[]
     pw_var = Float64[]
     pw_skew = Float64[]
     pw_exkurt = Float64[]
 
+    # Pre-transposition/excision (m') moments, recorded at the same generations
     pw_mean_m0 = Float64[]
     pw_var_m0 = Float64[]
     pw_skew_m0 = Float64[]
     pw_exkurt_m0 = Float64[]
 
     for gen in 1:generations
-        # Parent sampling
         tot = 0.0
         @inbounds for i in 1:population_size
             p = population[i]
-            n = length(p[1]) + length(p[2])
-            fi = fitness_val(n, FITNESS)
+            fi = fitness_ectopic_roze(p[1], p[2], β_ect)
             fitness[i] = fi
             tot += fi
         end
@@ -221,17 +254,18 @@ function run_simulation_one_u(u_val::Float64, v_val::Float64)
 
         new_pop = Vector{Tuple{Vector{Float64}, Vector{Float64}}}(undef, population_size)
         @inbounds for i in 1:population_size
-            i1 = searchsortedfirst(cum_probs, rand())
-            i2 = searchsortedfirst(cum_probs, rand())
+            r1 = rand()
+            r2 = rand()
+            i1 = searchsortedfirst(cum_probs, r1)
+            i2 = searchsortedfirst(cum_probs, r2)
             i1 = i1 > population_size ? population_size : i1
             i2 = i2 > population_size ? population_size : i2
-            chrom1, chrom2, n0 = form_offspring_roze(population[i1], population[i2], u_val, v_val)
+            chrom1, chrom2, n0 = form_offspring_roze(population[i1], population[i2], R_val)
             new_pop[i] = (chrom1, chrom2)
             m0_vals[i] = n0
         end
         population = new_pop
 
-        # Moments without allocating counts vector
         sum_n = 0.0
         @inbounds for i in 1:population_size
             p = population[i]
@@ -247,7 +281,6 @@ function run_simulation_one_u(u_val::Float64, v_val::Float64)
         end
         σ²_sim = max(0.0, sum_sq / population_size)
         σ²_safe = max(eps(), σ²_sim)
-
         sum_c3 = 0.0
         sum_c4 = 0.0
         @inbounds for i in 1:population_size
@@ -262,7 +295,7 @@ function run_simulation_one_u(u_val::Float64, v_val::Float64)
         skew = m3 / (σ²_safe^1.5)
         exkurt = (m4 / (σ²_safe^2)) - 3.0
 
-        # Same moment computation, applied to the pre-transposition counts (m_0)
+        # Same moment computation, applied to the pre-transposition/excision counts (m')
         sum_n_m0 = 0.0
         @inbounds for i in 1:population_size
             sum_n_m0 += m0_vals[i]
@@ -302,9 +335,8 @@ function run_simulation_one_u(u_val::Float64, v_val::Float64)
             push!(pw_exkurt_m0, exkurt_m0)
         end
 
-        # NB ODE update
-        β₁ = dln_omega_dmu(μ_nb, s_val, FITNESS)
-        β₂ = d2ln_omega_dmu2(μ_nb, s_val, FITNESS)
+        β₁ = dln_omega_dmu(μ_nb, s_val, THEORY_FITNESS)
+        β₂ = d2ln_omega_dmu2(μ_nb, s_val, THEORY_FITNESS)
         p_nb = clamp(μ_nb / max(eps(), σ²_nb), eps(), 1.0 - eps())
         ρ = (2.0 - p_nb) / p_nb
         α = (6.0 * (1.0 - p_nb) + p_nb^2) / max(eps(), p_nb^2)
@@ -340,10 +372,20 @@ function run_simulation_one_u(u_val::Float64, v_val::Float64)
 
     p_app_last = μ_app / max(eps(), σ²_app)
 
+    E1_val = compute_E1(R_val, u_val)
+    rho_num = compute_rho_numerical(E1_val, u_val, v_val, α_for_rho)
+
+    inv_p_sim = 1.0 / max(eps(), sim_p_pw)
+    inv_p_app = 1.0 / max(eps(), p_app_last)
+    inv_p_nb = 1.0 / max(eps(), p_nb_last)
+    inv_p_sim_m0 = 1.0 / max(eps(), sim_p_pw_m0)   # rho at the pre-transposition/excision stage
+
     summary_row = (
+        R = R_val,
         u = u_val,
         v = v_val,
-        u_minus_v = u_val - v_val,
+        beta_ect = β_ect,
+        s_theory = s_val,
         fit = FITNESS,
         sim_μ = sim_mean_pw,
         app_μ = μ_app,
@@ -358,11 +400,18 @@ function run_simulation_one_u(u_val::Float64, v_val::Float64)
         nb_skew = nb_skew_last,
         sim_exkurt = sim_exkurt_pw,
         nb_exkurt = nb_exkurt_last,
+        E1 = E1_val,
+        rho_numerical = rho_num,
+        inv_p_sim = inv_p_sim,
+        inv_p_app = inv_p_app,
+        inv_p_nb = inv_p_nb,
+        # Pre-transposition/excision (m') simulation moments
         sim_μ_m0 = sim_mean_pw_m0,
         sim_σ²_m0 = sim_var_pw_m0,
         sim_p_m0 = sim_p_pw_m0,
         sim_skew_m0 = sim_skew_pw_m0,
         sim_exkurt_m0 = sim_exkurt_pw_m0,
+        inv_p_sim_m0 = inv_p_sim_m0,
     )
 
     println("  ┌─────────────┬──────────────┬──────────────┬──────────────┬──────────────┬──────────────┐")
@@ -377,17 +426,19 @@ function run_simulation_one_u(u_val::Float64, v_val::Float64)
     @printf("  │ Theory (NB) │ %12.2f │ %12.2f │ %12.4f │ %12.2f │ %12.2f │\n",
             μ_nb, σ²_nb, p_nb_last, nb_skew_last, nb_exkurt_last)
     println("  └─────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┘")
+    println("  E₁ = $E1_val,  ρ (numerical) = $rho_num")
+    println("  1/p: sim = $inv_p_sim,  app = $inv_p_app,  nb = $inv_p_nb  (approx/NB: exp(-s·n²), s = $s_val)")
+    println("  1/p (pre-transposition/excision): sim = $inv_p_sim_m0")
 
     return summary_row
 end
 
 # Main sweep
 summary_path = joinpath(csv_dir, "$(CSV_BASENAME)_$(FITNESS).csv")
-n_total = length(u_values)
-for (i, u_val) in enumerate(u_values)
-    v_val = v_values[i]
-    println("\n[$i/$n_total]  Running u = $u_val  (v = $v_val, u-v = $(u_val - v_val), fitness = $FITNESS, u/v model = $UV_EVENT_MODEL) ...")
-    summary_row = run_simulation_one_u(u_val, v_val)
+n_total = length(R_values)
+for (i, R_val) in enumerate(R_values)
+    println("\n[$i/$n_total]  Running R = $R_val  (u = $u_val, v = $v_val, sim β_ect = $β_ect, theory s = $s_val, rate model = $UV_EVENT_MODEL)")
+    summary_row = run_simulation_one_R(R_val)
     df_row = DataFrame([summary_row])
     if i == 1
         CSV.write(summary_path, df_row)
@@ -396,4 +447,3 @@ for (i, u_val) in enumerate(u_values)
     end
 end
 println("\nSummary CSV written: $summary_path")
-

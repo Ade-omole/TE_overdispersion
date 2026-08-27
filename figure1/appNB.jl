@@ -1,5 +1,4 @@
 # Individual-based TE simulation with approximate and negative-binomial ODE closures.
-# Writes one time-series CSV under csv_files/ (read by appNBfig.py).
 
 using Random, Distributions, CSV, DataFrames, Statistics
 

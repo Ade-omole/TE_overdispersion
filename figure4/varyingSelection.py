@@ -1,4 +1,4 @@
-"""Plot dispersion ratio and higher moments versus selection coefficient s."""
+"""Plot dispersion ratio and higher moments versus selection strength s."""
 
 import os
 from pathlib import Path
@@ -7,14 +7,16 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.ticker import FixedLocator, FuncFormatter, NullLocator
-from scipy import integrate
 from scipy.interpolate import make_interp_spline
+
+# ----- Theory source for the negative-binomial curves
+NB_THEORY_SOURCE = "analytic"  # "numeric" or "analytic"
 
 FIG_DIR = Path(__file__).resolve().parent
 TE_ROOT = FIG_DIR.parent
 CSV_DIR = TE_ROOT / "csv_files"
 
-# Plot styling
+# ----- Plot styling constants (matching varyingRateFig.py)
 LEFT_SIM_MARKER_SIZE = 8
 RIGHT_SIM_MARKER_SIZE = 11
 MAIN_LINEWIDTH = 5
@@ -37,66 +39,46 @@ HORIZONTAL_GRID_ALPHA = 0.18
 HORIZONTAL_GRID_LINESTYLE = "-"
 HORIZONTAL_GRID_LINEWIDTH = 0.8
 
-LEFT_LEGEND_X = 1.0
-LEFT_LEGEND_Y = 0.09
-LEFT_LEGEND_LOC = "lower right"
-EVENT_MODEL = "binomial"  # must match varyingSelection.jl
+# ----- Legend positioning (tweak these to adjust)
+LEFT_LEGEND_X = 0.0       # horizontal position (0.0 = left edge)
+LEFT_LEGEND_Y = 0.88       # vertical position (0.0 = bottom, 1.0 = top); kept below 1
+                           # so the box clears the dashed "Approximate" line near the top
+LEFT_LEGEND_LOC = "upper left"  # anchor point of the legend box
+EVENT_MODEL = "binomial"  # "binomial" or "poisson" — must match varyingSelection.jl
 FITNESS_TAG = "exp"
 
+# ----- Fixed biological / map parameters
 R_MAP = 10.0
 U = 1e-2
 V = 1e-4
-ALPHA_ROZE = 0.0
+ALPHA_ROZE = 0.0  # α in Roze's (u+v+α)/2; set nonzero if using selfing term from Roze (2023)
 
 CSV_SIM = CSV_DIR / f"varyingSelection_{EVENT_MODEL}_{FITNESS_TAG}_u{U}_v{V}_4.csv"
 
-def compute_E1(R: float, u: float, eps: float = 1e-12) -> float:
-    """ε₁ for linear map of length R Morgans (Roze appendix)."""
-    R = max(R, eps)
-    rho_R = u / R
-    if R <= 1.0:
-        half_plus_rho = 0.5 + rho_R
-        if rho_R <= 0.0 or half_plus_rho <= 0.0:
-            return 0.0
-        return (2.0 / R) * (
-            (1.0 + 2.0 * rho_R) * (np.log(half_plus_rho) - np.log(max(rho_R, eps))) - 1.0
-        )
-
-    def integrand(x: float) -> float:
-        denom = (1.0 - np.exp(-2.0 * x)) / 2.0 + 2.0 * u
-        return (R - x) / max(np.finfo(float).eps, denom)
-
-    res, _ = integrate.quad(integrand, 0.0, R, limit=200)
-    return (2.0 / (R**2)) * res
-
-
-def roze_rho_eq14(E1: float, u: float, v: float, alpha: float = 0.0, eps: float = 1e-10) -> float:
-    """Roze (2023) eq. (14)."""
-    denom = 1.0 - u * E1
-    if abs(denom) < eps:
-        denom = eps if denom >= 0 else -eps
-    return 1.0 + (E1 / denom) * ((u + v + alpha) / 2.0)
-
-
-def roze_rho_eq5_13(E1: float, u: float, v: float, alpha: float = 0.0) -> float:
-    """ρ = Var/Mean from n̄ (1 + ε₁ (u+v+α)/2); Roze (2023) eqs. (5) and (13)."""
-    return 1.0 + E1 * ((u + v + alpha) / 2.0)
-
-
-def roze_mean_eq11(s: float, u: float, v: float, alpha: float = 0.0) -> float:
-    """Roze (2023) eq.~(11): n̄ ≈ (u − v − α) / β with β = 2s (same β as w(n)=exp(−s n²) in this script)."""
+def roze_moments(s: float, u: float, v: float, alpha: float = 0.0):
+    """Roze (2023) mean, variance and dispersion ratio from the paper's own"""
     beta = 2.0 * max(float(s), np.finfo(float).eps)
     num = u - v - alpha
     if num <= 0.0:
-        return np.nan
-    return num / beta
+        return np.nan, np.nan, np.nan
+    mean = num / beta
+    var = mean * (1.0 + 4.0 * u) - beta * mean**2
+    return mean, var, var / mean
 
 
-def roze_variance_from_rho513(mu_roze: float, rho_513: float) -> float:
-    """σ² = ρ · n̄ pairing eqs.~(5)+(13) with eq.~(11) mean (ρ from ``roze_rho_eq5_13``)."""
-    if not (np.isfinite(mu_roze) and np.isfinite(rho_513)):
-        return np.nan
-    return rho_513 * mu_roze
+def nb_analytic(u, v, s):
+    """Closed-form negative-binomial equilibrium (main_rev2, Gaussian fitness)."""
+    rho = 1.0 + 3.0 * u + v + s                                  # Eq. (14)
+    rho15 = 1.0 + 3.0 * u + v                                    # rho used in Eq. (15)
+    mu = (u - v) / (2.0 * s * rho15) - 0.5 - 3.0 * u - v         # Eq. (15)
+    var = rho15 * mu                                             # Eq. (15)
+    skew = (1.0 + 6.0 * u + 2.0 * v) / np.sqrt(var)              # Eq. (16)
+    exkurt = (1.0 + 6.0 * (3.0 * u + v) + 6.0 * (3.0 * u + v) ** 2) / var  # Eq. (16)
+    # Eq. (23), unexpanded ratio: exact given mu and var, unlike the
+    rho_pre = (mu + var * (1.0 - 3.0 * (u - v)) + s * var**2 / mu) / (
+        2.0 * mu * (1.0 - (u - v))
+    )
+    return rho, mu, var, skew, exkurt, rho_pre
 
 
 def approx_mean_variance(s: float, u: float, v: float):
@@ -129,12 +111,7 @@ def nb_equilibrium_moments(
     tol: float = 1e-7,
     check_every: int = 2_000,
 ):
-    """
-    NB parametric closure: same ODE as varyingRsim.jl / varyingSelection.jl.
-    Returns (rho, skew, excess_kurtosis, mu, sigma^2) at equilibrium, with
-      rho = sigma^2/mu, skew = rho_shape/sqrt(sigma^2), ex. kurt = alpha_shape/sigma^2
-    (same as Julia nb_skew_last, nb_exkurt_last after the loop; mu and sigma^2 are the closure state).
-    """
+    """NB parametric closure: same ODE as varyingRsim.jl / varyingSelection.jl."""
     eps = np.finfo(float).eps
     mu_nb = 10.0
     sig2_nb = 10.0
@@ -178,9 +155,7 @@ def nb_equilibrium_moments(
     return (rho_disp, skew, exkurt, mu_nb, sig2_nb)
 
 
-# Table formatting (used by main only)
-
-
+# Table / CSV formatting
 def _fmt_rho(x) -> str:
     """Dispersion ratios ρ: four decimal places."""
     if x is None or (isinstance(x, float) and not np.isfinite(x)):
@@ -264,12 +239,14 @@ def _sim_at_s(df: pd.DataFrame, s: float, rtol: float = 1e-6, atol: float = 1e-1
 
 
 def main():
-    # Keep in sync with s_list in varyingSelection.jl.
-    s_values = np.sort(
-        np.unique(
-            np.array([3e-5, 1e-4, 3e-4, 5e-4, 1e-3, 2e-3], dtype=float),
-        )
+    # Swept parameter: s in w(n) = exp(-s n^2); Roze beta = 2s
+    s_values = np.array(
+        # [3e-6, 1e-5, 3e-5, 1e-4, 5e-4, 1e-3, 4e-3, 7e-3],
+        [3e-5, 1e-4, 3e-4, 5e-4, 1e-3, 2e-3], # for u = 1e-2
+        dtype=float,
     )
+    # Monotonic increasing s (stable merge with simulation CSV).
+    s_values = np.sort(np.unique(s_values))
     beta_values = 2.0 * s_values
 
     mu_app = np.empty_like(beta_values)
@@ -280,28 +257,25 @@ def main():
     sig2_nb = np.empty_like(beta_values)
     nb_skew = np.empty_like(beta_values)
     nb_exkurt = np.empty_like(beta_values)
-    rho_roze_14 = np.empty_like(beta_values)
-    rho_roze_513 = np.empty_like(beta_values)
+    rho_roze = np.empty_like(beta_values)
     mu_roze = np.empty_like(beta_values)
     sig2_roze = np.empty_like(beta_values)
-
-    E1 = compute_E1(R_MAP, U)
 
     for i, s in enumerate(s_values):
         mu_a, var_a = approx_mean_variance(s, U, V)
         mu_app[i] = mu_a
         sig2_app[i] = var_a
         rho_app[i] = var_a / mu_a if mu_a > 0 and np.isfinite(var_a) else np.nan
-        rnb, sk, ek, mnb, s2nb = nb_equilibrium_moments(s, U, V, fit="exp")
+        if NB_THEORY_SOURCE == "analytic":
+            rnb, mnb, s2nb, sk, ek, _ = nb_analytic(U, V, s)
+        else:
+            rnb, sk, ek, mnb, s2nb = nb_equilibrium_moments(s, U, V, fit="exp")
         rho_nb[i] = rnb
         mu_nb[i] = mnb
         sig2_nb[i] = s2nb
         nb_skew[i] = sk
         nb_exkurt[i] = ek
-        rho_roze_14[i] = roze_rho_eq14(E1, U, V, ALPHA_ROZE)
-        rho_roze_513[i] = roze_rho_eq5_13(E1, U, V, ALPHA_ROZE)
-        mu_roze[i] = roze_mean_eq11(s, U, V, ALPHA_ROZE)
-        sig2_roze[i] = roze_variance_from_rho513(mu_roze[i], rho_roze_513[i])
+        mu_roze[i], sig2_roze[i], rho_roze[i] = roze_moments(s, U, V, ALPHA_ROZE)
 
     df_sim = None
     if CSV_SIM.is_file():
@@ -311,10 +285,11 @@ def main():
     else:
         print(f"No {CSV_SIM} — simulation columns will be empty (run: julia varyingSelection.jl)")
 
-    print("\nRoze eq.~(11)  n̄ = (u−v−α)/β  and  σ² = ρ₅,₁₃·n̄  (β = 2s; ρ₅,₁₃ from eqs.~(5)+(13)):")
+    print("\nRoze (2023)  n̄ = (u−v−α)/β  (eq. 11),  σ² = n̄(1+4u) − β n̄²  (eq. 5),  ρ = σ²/n̄  (β = 2s):")
     for i, s in enumerate(s_values):
         print(
-            f"  s={float(s):.6g}  β={beta_values[i]:.6g}  μ_Roze={mu_roze[i]:.2f}  σ²_Roze={sig2_roze[i]:.2f}"
+            f"  s={float(s):.6g}  β={beta_values[i]:.6g}  μ_Roze={mu_roze[i]:.2f}  "
+            f"σ²_Roze={sig2_roze[i]:.2f}  ρ_Roze={rho_roze[i]:.4f}"
         )
 
     col_labels = [
@@ -328,8 +303,7 @@ def main():
         "ρ NB",
         "μ Roze",
         "σ² Roze",
-        "ρ R14",
-        "ρ R513",
+        "ρ Roze",
         "ρ sim",
         "μ sim",
         "σ² sim",
@@ -354,8 +328,7 @@ def main():
                 _fmt_rho(rho_nb[i]),
                 _fmt_two(mu_roze[i]),
                 _fmt_two(sig2_roze[i]),
-                _fmt_rho(rho_roze_14[i]),
-                _fmt_rho(rho_roze_513[i]),
+                _fmt_rho(rho_roze[i]),
                 _fmt_sim(sim, "rho_sim"),
                 _fmt_sim(sim, "sim_μ"),
                 _fmt_sim(sim, "sim_σ²"),
@@ -391,20 +364,19 @@ def main():
             cell.set_facecolor("#f8f8f8" if r % 2 == 0 else "#ffffff")
 
     title = (
-        rf"$\rho$ and moments by $s$ — $R={R_MAP:g}$, $u={U:g}$, $v={V:g}$, $\alpha={ALPHA_ROZE:g}$, "
-        rf"$\varepsilon_1={E1:.5g}$"
+        rf"$\rho$ and moments by $s$ — $R={R_MAP:g}$, $u={U:g}$, $v={V:g}$, $\alpha={ALPHA_ROZE:g}$"
     )
     fig.suptitle(title, fontsize=11, y=0.995)
-
     out_table = FIG_DIR / "varyingSelection_table.pdf"
     fig.savefig(out_table, bbox_inches="tight")
     print(f"Saved {out_table}")
 
-    color_red = "#d62728"
-    color_roze = "#9467bd"
-    color_black = "#000000"
-    color_skew = "#1f77b4"
-    color_exkurt = "#ff7f0e"
+    # ----- Combined figure: dispersion (left) and higher moments (right)
+    color_red = "#d62728"      # Simulation markers
+    color_roze = "#9467bd"     # Roze (2023) - violet
+    color_black = "#000000"    # Approximate & Parametric theory lines
+    color_skew = "#1f77b4"     # Skewness (blue)
+    color_exkurt = "#ff7f0e"   # Excess kurtosis (orange)
 
     line_kwargs = dict(
         linewidth=MAIN_LINEWIDTH,
@@ -414,18 +386,26 @@ def main():
         solid_capstyle="round",
     )
 
+    # Sort by s for smooth spline interpolation
     idx_sort_s = np.argsort(s_values)
     x_line_s = s_values[idx_sort_s]
+
+    # Smooth spline curves for left panel (dispersion)
     x_smooth_app, y_smooth_app = smooth_log_spline(x_line_s, rho_app[idx_sort_s])
     x_smooth_nb, y_smooth_nb = smooth_log_spline(x_line_s, rho_nb[idx_sort_s])
-    x_smooth_roze14, y_smooth_roze14 = smooth_log_spline(x_line_s, rho_roze_14[idx_sort_s])
+    x_smooth_roze, y_smooth_roze = smooth_log_spline(x_line_s, rho_roze[idx_sort_s])
+
+    # Smooth spline curves for right panel (higher moments)
     x_smooth_skew, y_smooth_skew = smooth_log_spline(x_line_s, nb_skew[idx_sort_s])
     x_smooth_exkurt, y_smooth_exkurt = smooth_log_spline(x_line_s, nb_exkurt[idx_sort_s])
 
+    # Create side-by-side figure
     fig_combined, (ax_left, ax_right) = plt.subplots(1, 2, figsize=(16, 6), dpi=120)
+
+    # ----- Left panel: Dispersion ratio ρ vs s
     ax_left.plot(x_smooth_app, y_smooth_app, color=color_black, linestyle="--", label="Approximate", **line_kwargs)
     ax_left.plot(x_smooth_nb, y_smooth_nb, color=color_black, linestyle="-", label="Parametric", **line_kwargs)
-    ax_left.plot(x_smooth_roze14, y_smooth_roze14, color=color_roze, linestyle="-", label="Roze (2023)", **line_kwargs)
+    ax_left.plot(x_smooth_roze, y_smooth_roze, color=color_roze, linestyle="-", label="Roze (2023)", **line_kwargs)
 
     if df_sim is not None:
         ax_left.scatter(
@@ -468,6 +448,7 @@ def main():
         prop={"size": LEGEND_FONTSIZE, "weight": "bold"},
     )
 
+    # ----- Right panel: Skewness and Excess Kurtosis vs s
     has_sim_moments = df_sim is not None and "sim_skew" in df_sim.columns and "sim_exkurt" in df_sim.columns
 
     if has_sim_moments:
@@ -538,7 +519,6 @@ def main():
     fig_combined.savefig(out_combined, bbox_inches="tight")
     print(f"Saved {out_combined}")
 
-    print(f"ε₁(R={R_MAP}, u={U}) = {E1:.4f}  (Roze ρ from eq.~(14) and (5)+(13) independent of β here)")
     _figures = [fig, fig_combined]
     if os.environ.get("MPLBACKEND", "").lower() != "agg":
         plt.show()

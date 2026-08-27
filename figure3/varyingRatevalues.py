@@ -1,17 +1,16 @@
-"""Print summary tables for the varying-u sweep (simulation vs theory)."""
+"""Print summary tables for the u-sweep (simulation vs theory)."""
 
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy import integrate
 
 TE_ROOT = Path(__file__).resolve().parent.parent
 CSV_DIR = TE_ROOT / "csv_files"
 
 R_val = 10.0
 fitness = "exp"
-CSV_BASENAME = "sweep_u_roze_more_values_vConst:0.0001_5_binomial"
+CSV_BASENAME = "sweep_u_more_values_vConst:0.0001_6_binomial"
 
 csv_path = CSV_DIR / f"{CSV_BASENAME}_{fitness}.csv"
 if not csv_path.is_file():
@@ -22,6 +21,10 @@ if not csv_path.is_file():
 df = pd.read_csv(csv_path)
 print(f"Loaded {csv_path}, shape {df.shape}")
 
+u_vals = df["u"].values
+v_vals = df["v"].values
+
+# ----- Post-transposition (as measured in the simulation / CSV)
 sim_mean = df["sim_μ"].values
 app_mean = df["app_μ"].values
 nb_mean = df["nb_μ"].values
@@ -38,108 +41,123 @@ if has_skew:
     sim_exkurt = df["sim_exkurt"].values
     nb_exkurt = df["nb_exkurt"].values
 
-# Roze (2023): per-row u, v; table rho from eqs. (5)+(13); footer uses eq. (14).
+# ----- Pre-transposition simulation (the "_m0" columns)
+has_m0 = "sim_μ_m0" in df.columns
+if has_m0:
+    sim_mean_m0 = df["sim_μ_m0"].values
+    sim_var_m0 = df["sim_σ²_m0"].values
+    sim_p_m0 = df["sim_p_m0"].values
+
+# ----- Theory (Neg. bin.), pre-transposition
+S_VAL = 1e-4  # matches fit="exp", w(n) = exp(-s n^2)
+
+
+def pretransp_nb_theory(mu, sig2, s=S_VAL):
+    """Pre-transposition NB theory (Eqs. 6-7): returns (mean, variance, rho)."""
+    p = mu / sig2
+    sigma = np.sqrt(sig2)
+    gamma = ((2.0 - p) / p) / sigma
+    kappa = (6.0 * (1.0 - p) + p**2) / sig2 + 3.0
+
+    beta1, beta2 = -2.0 * s * mu, -2.0 * s
+    e_m0 = mu + beta1 * sig2 + 0.5 * beta2 * gamma * sig2**1.5
+    var_m0 = (
+        0.5 * (mu + sig2)
+        + 0.5 * beta1 * (sig2 + gamma * sig2**1.5)
+        + 0.25 * beta2 * (gamma * sig2**1.5 + (kappa - 1.0) * sig2**2)
+    )
+    return e_m0, var_m0, var_m0 / e_m0
+
+
+# ----- Theory (approx.), pre-transposition
+def approx_pretransp_rho(u, v):
+    """rho^app_{m'} = (1 + 2v) / (1 - 2u + 2v)."""
+    denom = 1.0 - 2.0 * u + 2.0 * v
+    return (1.0 + 2.0 * v) / denom if denom != 0 else np.nan
+
+
+# ----- Roze (2023): mean and variance from the paper's own equations
 ALPHA_ROZE = 0.0
-BETA_ROZE = 2.0 / 10**4
+BETA_ROZE = 2.0 * S_VAL  # matches fit="exp" (w(n) = exp(-s n^2) <=> W = exp(-alpha n - beta n^2/2))
+roze_mean = (u_vals - v_vals - ALPHA_ROZE) / BETA_ROZE
 
+# Pre-transposition variance: Roze (2023) eq. (5), Var(n) ~= n̄ + 2*sum(D_ij),
+roze_var_preT = roze_mean * (1.0 + 2.0 * u_vals) - BETA_ROZE * roze_mean**2
 
-def compute_E1(R, u, eps=1e-12):
-    """E₁ (ε₁) for linear genetic map of length R Morgans (Roze appendix). R, u scalars."""
-    R = max(R, eps)
-    rho_R = u / R
-    if R <= 1.0:
-        half_plus_rho = 0.5 + rho_R
-        if rho_R <= 0.0 or half_plus_rho <= 0.0:
-            return 0.0
-        return (2.0 / R) * ((1.0 + 2.0 * rho_R) * (np.log(half_plus_rho) - np.log(max(rho_R, eps))) - 1.0)
+# Post-transposition variance: same mean (eq. 11) + review-file eq. (7),
+roze_var_postT = roze_mean * (1.0 + 4.0 * u_vals) - BETA_ROZE * roze_mean**2
 
-    def integrand(x):
-        denom = (1.0 - np.exp(-2.0 * x)) / 2.0 + 2.0 * u
-        return (R - x) / max(np.finfo(float).eps, denom)
-
-    res, _ = integrate.quad(integrand, 0.0, R, limit=200)
-    return (2.0 / (R**2)) * res
-
-
-def compute_rho_eq14(E1, u, v, alpha=0.0, eps=1e-10):
-    """Roze (2023) eq. (14): ρ ≈ 1 + (ε₁/(1 − u ε₁)) ((u + v + α)/2)."""
-    denom = 1.0 - u * E1
-    if abs(denom) < eps:
-        denom = eps if denom >= 0 else -eps
-    return 1.0 + E1 * ((u + v + alpha) / 2.0)
-
-
-u_vals = df["u"].values
-v_vals = df["v"].values
-E1_vals = np.array([compute_E1(R_val, u) for u in u_vals])
-rho_roze = np.array([compute_rho_eq14(E1, u, v) for E1, u, v in zip(E1_vals, u_vals, v_vals)])
-
-roze_mean_arr = np.array(
-    [
-        (u - v - ALPHA_ROZE) / BETA_ROZE if BETA_ROZE > 0 else np.nan
-        for u, v in zip(u_vals, v_vals)
-    ]
-)
-roze_var_arr = np.array(
-    [
-        m * (1.0 + e1 * (u + v + ALPHA_ROZE) / 2.0)
-        if np.isfinite(m) and m > 0
-        else np.nan
-        for m, e1, u, v in zip(roze_mean_arr, E1_vals, u_vals, v_vals)
-    ]
-)
-roze_rho_vm_arr = np.where(
-    np.isfinite(roze_mean_arr) & (roze_mean_arr > 0),
-    roze_var_arr / roze_mean_arr,
-    np.nan,
-)
+# rho columns: computed directly from the mean/variance above (rather than the
+roze_rho_preT = roze_var_preT / roze_mean
+roze_rho_postT = roze_var_postT / roze_mean
 
 n_total = len(u_vals)
+w1 = 28
+header = f"  ┌{'─' * w1}┬──────────────┬──────────────┬──────────────┬──────────────┬──────────────┐"
+colhead = f"  │{'':^{w1}}│     Mean     │   Variance   │      ρ       │   Skewness   │  Ex. Kurtosis│"
+midrule = f"  ├{'─' * w1}┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────┤"
+footer = f"  └{'─' * w1}┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┘"
+
+
+def fmt_row(label, mean, var, rho, skew=None, exkurt=None):
+    mean_s = f"{mean:12.2f}" if mean is not None and np.isfinite(mean) else f"{'—':^12}"
+    var_s = f"{var:12.2f}" if var is not None and np.isfinite(var) else f"{'—':^12}"
+    rho_s = f"{rho:12.4f}" if rho is not None and np.isfinite(rho) else f"{'—':^12}"
+    skew_s = f"{skew:12.2f}" if skew is not None and np.isfinite(skew) else f"{'—':^12}"
+    exkurt_s = f"{exkurt:12.2f}" if exkurt is not None and np.isfinite(exkurt) else f"{'—':^12}"
+    return f"  │{label:<{w1}}│ {mean_s} │ {var_s} │ {rho_s} │ {skew_s} │ {exkurt_s} │"
+
+
 for i in range(n_total):
     u, v = u_vals[i], v_vals[i]
-    e1 = E1_vals[i]
-    rm, rv, rvm = roze_mean_arr[i], roze_var_arr[i], roze_rho_vm_arr[i]
-    r14 = rho_roze[i]
-    inv_sim = 1.0 / max(sim_p[i], 1e-12)
-    inv_app = 1.0 / max(app_p[i], 1e-12)
-    inv_nb = 1.0 / max(nb_p[i], 1e-12)
 
-    w1 = 22
-    print(f"\n[{i + 1}/{n_total}]  u = {u}  (v = {v}, fitness = {fitness}, R = {R_val}) [Roze]")
-    print("  ┌──────────────────────┬──────────────┬──────────────┬──────────────┬──────────────┬──────────────┐")
-    print(f"  │{'':^{w1}}│     Mean     │   Variance   │      ρ       │   Skewness   │  Ex. Kurtosis│")
-    print("  ├──────────────────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────┤")
+    # Shared skewness / excess kurtosis -- same values used in both the
+    sk = sim_skew[i] if has_skew else None
+    ek = sim_exkurt[i] if has_skew else None
+    nsk = nb_skew[i] if has_skew else None
+    nek = nb_exkurt[i] if has_skew else None
+
+    # ----- Pre-transposition table
+    print(f"\n[{i + 1}/{n_total}]  u = {u}  (v = {v}, fitness = {fitness}) — Pre-transposition")
+    print(header)
+    print(colhead)
+    print(midrule)
+    if has_m0:
+        sm0, sv0, sp0 = sim_mean_m0[i], sim_var_m0[i], sim_p_m0[i]
+        sim_rho0 = sv0 / sm0 if sm0 > 0 else np.nan
+        print(fmt_row("Simulation- Pre T.", sm0, sv0, sim_rho0, sk, ek))
+    else:
+        print(fmt_row("Simulation- Pre T.", None, None, None))
+
+    e_m0, var_m0, rho_nb_preT = pretransp_nb_theory(nb_mean[i], nb_var[i])
+    print(fmt_row("Theory (Neg. bin.)- Pre T.", e_m0, var_m0, rho_nb_preT, nsk, nek))
+
+    # Theory (approx.) only gives a formula for rho (the dispersion ratio);
+    rho_app_preT = approx_pretransp_rho(u, v)
+    print(fmt_row("Theory (approx.)- Pre T.", app_mean[i], app_mean[i] * rho_app_preT, rho_app_preT))
+
+    print(fmt_row("Roze (2023)- Pre T.", roze_mean[i], roze_var_preT[i], roze_rho_preT[i]))
+    print(footer)
+
+    # ----- Post-transposition table
+    print(f"\n[{i + 1}/{n_total}]  u = {u}  (v = {v}, fitness = {fitness}) — Post-transposition")
+    print(header)
+    print(colhead)
+    print(midrule)
     sm, sv, sp = sim_mean[i], sim_var[i], sim_p[i]
     sim_rho = sv / sm if sm > 0 else np.nan
-    if has_skew:
-        print(
-            f"  │{'Simulation':<{w1}}│ {sm:12.2f} │ {sv:12.2f} │ {sim_rho:12.4f} │ {sim_skew[i]:12.2f} │ {sim_exkurt[i]:12.2f} │"
-        )
-    else:
-        print(f"  │{'Simulation':<{w1}}│ {sm:12.2f} │ {sv:12.2f} │ {sim_rho:12.4f} │      —       │      —       │")
-    nm, nv, np_ = nb_mean[i], nb_var[i], nb_p[i]
+    print(fmt_row("Simulation- Post T.", sm, sv, sim_rho, sk, ek))
+
+    nm, nv = nb_mean[i], nb_var[i]
     nb_rho = nv / nm if nm > 0 else np.nan
-    if has_skew:
-        print(
-            f"  │{'Theory (Neg. bin.)':<{w1}}│ {nm:12.2f} │ {nv:12.2f} │ {nb_rho:12.4f} │ {nb_skew[i]:12.2f} │ {nb_exkurt[i]:12.2f} │"
-        )
-    else:
-        print(f"  │{'Theory (Neg. bin.)':<{w1}}│ {nm:12.2f} │ {nv:12.2f} │ {nb_rho:12.4f} │      —       │      —       │")
-    am, av, ap = app_mean[i], app_var[i], app_p[i]
+    print(fmt_row("Theory (Neg. bin.)- Post T.", nm, nv, nb_rho, nsk, nek))
+
+    am, av = app_mean[i], app_var[i]
     app_rho = av / am if am > 0 else np.nan
-    print(f"  │{'Theory (approx.)':<{w1}}│ {am:12.2f} │ {av:12.2f} │ {app_rho:12.4f} │      —       │      —       │")
-    print(
-        f"  │{'Roze (2023)':<{w1}}│ {rm:12.2f} │ {rv:12.2f} │ {rvm:12.4f} │      —       │      —       │"
-    )
-    print("  └──────────────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┘")
-    print(
-        f"  1/p (ρ⁻¹):  sim = {inv_sim:.6g}   Theory (approx.) = {inv_app:.6g}   "
-        f"Theory (Neg. bin.) = {inv_nb:.6g}   Roze (2023, eq.5+13) = {rvm:.6g}"
-    )
-    print(
-        f"  ε₁ (E₁) at R={R_val}, u={u:g} → {e1:.6g}   |   rho_combine_eq14 (Roze eq. 14) = {r14:.6g}   "
-        f"(differs from Roze table ρ = var/mean when eq. 14 ≠ eq. 5+13 closure)"
-    )
+    print(fmt_row("Theory (approx.)- Post T.", am, av, app_rho))
+
+    print(fmt_row("Roze (2023)- Post T.", roze_mean[i], roze_var_postT[i], roze_rho_postT[i]))
+    print(footer)
 
 if not has_skew:
     print("\nNote: skewness / excess kurtosis columns not in CSV. Re-run varyingRatesim.jl if needed.")
